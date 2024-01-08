@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>eShop Listing</title>
+        <style>
+                /* Add your styling here */
+                #itemList {
+                        display: flex;
+                        flex-wrap: wrap;
+                        justify-content: space-around;
+                }
+
+                .item {
+                        border: 1px solid #ddd;
+                        margin: 10px;
+                        padding: 10px;
+                        width: calc(100% / 6 - 20px);
+                        /* Calculate width for 5 items per row, adjust margin accordingly */
+                }
+
+                .item img {
+                        cursor: pointer;
+                        width: 100%;
+                        /* Adjust as needed */
+                        height: auto;
+                }
+        </style>
+</head>
+
+<body>
+
+        <div id="itemList"></div>
+        <button onclick="fetchPreviousPage()">Previous Page</button>
+        <button onclick="fetchNextPage()">Next Page</button>
+
+        <script>
+                // Replace with your actual API endpoint
+                const apiEndpoint = 'http://localhost:8080/items';
+
+                // Tracks the current page
+                let currentPage = 1;
+
+                // Function to fetch items from the API
+                function fetchItems(page) {
+                        fetch(`${apiEndpoint}?page=${page}`)
+                                .then(response => response.json())
+                                .then(data => {
+                                        displayItems(data);
+                                })
+                                .catch(error => console.error('Error fetching items:', error));
+                }
+
+                // Function to display items on the page
+                function displayItems(items) {
+                        const container = document.getElementById('itemList');
+                        container.innerHTML = ''; // Clear previous items
+                        items.forEach(item => {
+                                const itemDiv = document.createElement('div');
+                                itemDiv.className = 'item';
+                                itemDiv.innerHTML = `
+      <h3>${item.name2}</h3>
+      <img src="${item.imageUrl}" alt="${item.name}" style="width:100px; height:auto;" onclick="openItem('${item.imageUrl2}', '${item.name}','${item.name2}','${item.documentId}' )">
+      <p>${item.name}</p>
+      <p>Price: $${item.price}</p>
+    `;
+                                container.appendChild(itemDiv);
+                        });
+                }
+
+                // Function to open the big picture of the item and report the click
+                function openItem(imgUrl, name, name2, documentId) {
+                        // Open a new window or tab with the big picture
+                        window.open(imgUrl, '_blank');
+
+                        // Call the backend API to report the click behavior
+                        // Replace 'https://yourapi.com/report-click' with your actual endpoint
+                        fetch('http://localhost:8080/report-click', {
+                                method: 'POST',
+                                headers: {
+                                        'Content-Type': 'application/json',
+                                },
+                                body: JSON.stringify({ name2: name2, documentId: documentId, name: name }),
+                        })
+                                .then(response => response.json())
+                                .then(data => console.log('Item click reported:', data))
+                                .catch(error => console.error('Error reporting click:', error));
+                }
+
+
+                // Function to fetch the next page of items
+                function fetchNextPage() {
+                        currentPage++;
+                        fetchItems(currentPage);
+                }
+
+                function fetchPreviousPage() {
+                        if (currentPage > 1) {
+                                currentPage--;
+                                fetchItems(currentPage);
+                        }
+                }
+
+                // Initial fetch
+                fetchItems(currentPage);
+
+        </script>
+</body>
+
+</html>
