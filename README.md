@@ -3,11 +3,12 @@
 ## Background
 1. MongoDB Atlas Search is the is a full-text search solution that offers a seamless and scalable experience for building relevance-based features.
 2. Atlas search uses lucene engine as the reversed index search engine as ES/Solr.
-3. This demo aims at create a demo with eShop search items scenario. It will return personalization of search results with recently viewed behaviors. 
+3. This demo aims at create a demo with eShop search items scenario. It will return personalization of search results with recently viewed behaviors. It also supports comnay operator configure some promotion keywords for special sale events.  
 
-## Data schema
-There are two collections in this demo, customers and items. The `customers` collection stores website visitor's recent behavior and user tags. The `items` collection stores eShop item details for display and search.  
+## Collections 
+* There are two main collections in this demo, customers and items. The `customers` collection stores website visitor's recent behavior and user tags. The `items` collection stores eShop item details for display and search.  
 
+* The `marketing_config` collection stores company operator's configuration for special sale promotion search 
 ### Customers
 Demo document:
 ```json
@@ -67,13 +68,133 @@ Demo document:
 }
 ```
 
+
+### Marketing_config 
+Demo document:
+
+```json
+{
+  "_id": { "$oid": "659e50986306c4fae5734903" },
+  "status": "active",
+  "promotionKeywords": ["手鐲", "薄荷"],
+  "startDate": {
+    "$date": { "$numberLong": "1704794839250" }
+  },
+  "endDate": {
+    "$date": { "$numberLong": "1704967719250" }
+  },
+  "promotionItemIDs": [
+    "94425B-24KG-00",
+    "94445E-24KG-00"
+  ]
+}
+```
+
+
+## Search index 
+Create the search index in Atlas webpage with the provided JSON configuration below
+
+```json
+{
+  "mappings": {
+    "dynamic": false,
+    "fields": {
+      "discountTag": {
+        "multi": {
+          "chinese": {
+            "analyzer": "lucene.chinese",
+            "searchAnalyzer": "lucene.chinese",
+            "type": "string"
+          },
+          "english": {
+            "analyzer": "lucene.english",
+            "searchAnalyzer": "lucene.english",
+            "type": "string"
+          },
+          "keyword": {
+            "analyzer": "lucene.keyword",
+            "searchAnalyzer": "lucene.keyword",
+            "type": "string"
+          }
+        },
+        "type": "string"
+      },
+      "documentId": {
+        "analyzer": "lucene.standard",
+        "type": "string"
+      },
+      "name": {
+        "multi": {
+          "chinese": {
+            "analyzer": "lucene.chinese",
+            "searchAnalyzer": "lucene.chinese",
+            "type": "string"
+          },
+          "english": {
+            "analyzer": "lucene.english",
+            "searchAnalyzer": "lucene.english",
+            "type": "string"
+          },
+          "keyword": {
+            "analyzer": "lucene.keyword",
+            "searchAnalyzer": "lucene.keyword",
+            "type": "string"
+          }
+        },
+        "type": "string"
+      },
+      "name2": {
+        "multi": {
+          "chinese": {
+            "analyzer": "lucene.chinese",
+            "searchAnalyzer": "lucene.chinese",
+            "type": "string"
+          },
+          "english": {
+            "analyzer": "lucene.english",
+            "searchAnalyzer": "lucene.english",
+            "type": "string"
+          },
+          "keyword": {
+            "analyzer": "lucene.keyword",
+            "searchAnalyzer": "lucene.keyword",
+            "type": "string"
+          }
+        },
+        "type": "string"
+      },
+      "originalPrice": {
+        "type": "number"
+      },
+      "price": {
+        "type": "number"
+      },
+      "productTag": {
+        "analyzer": "lucene.standard",
+        "type": "string"
+      },
+      "ratio": {
+        "type": "number"
+      }
+    }
+  }
+}
+```
+
 ## Procedure 
 ### Prerequest 
 1. Prepare your MongoDB instance with demo colleciotns. 
 2. Replace the `CONNECTION STRING`, `DB` fields in `backend.go` code.
+3. Create the search index according to the provided configuration. 
+
+### APIs
+1. http://localhost:8080/ get the item lists from DB
+2. http://localhost:8080/search search the item with user based recommendation  
+3. http://localshot:8080/search-p search the item with user based recommendation with one merged result 
+4. http://localshot:8080/search-m search the item with pre-configured promotion keywords with one merged result 
 
 ### Start backend server
-3. Use `go run backend.go` command to run the backend server 
+* Use `go run backend.go` command to run the backend server 
 
 ### Search with webpage
 1. Visit `http://localhost:8080/` to show the whole item lists.

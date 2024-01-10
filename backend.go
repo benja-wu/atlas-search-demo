@@ -3,21 +3,23 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
-	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 // Global client instance
 var clientInstance *mongo.Client
+var log *logrus.Logger
 
 // Used for creating a singleton client instance
 var clientInstanceError error
@@ -25,20 +27,43 @@ var mongoOnce sync.Once
 
 // Database Config
 const (
-	CONNECTIONSTRING    = "YOUR_MONOGDB_CONN_STRING"
-	DB                  = "YOUR_DATABASE"
-	COLLECTION          = "items"
-	CUSTOMER_COLLECTION = "customers"
+	CONNECTIONSTRING            = "YOUR_MONOGDB_CONN_STRING"
+	DB                          = "YOUR_DATABASE"
+	COLLECTION                  = "items"
+	CUSTOMER_COLLECTION         = "customers"
+	SEARCH_REPORT_COLLECTION    = "searchs"
+	MARKETING_CONFIG_COLLECTION = "marketing_config"
 )
 
-// ReportItem is the web page post item
+// ItemReport is the web page post item
 // for reporting user's click behavior
-type ReportItem struct {
+type ItemReport struct {
 	Name       string `json:"name"  bson:"name" `
 	DocumentId string `json:"documentId"  bson:"documentId"`
 	Name2      string `json:"name2" bson:"name2"`
 
 	ViewTime time.Time `json:"viewTime" bson:"viewTime"`
+}
+
+// QueryReport is the user input search query, search time and
+// total search this keyword counts, next page, previous page will
+// calculate into one search operation
+type QueryReport struct {
+	ID         primitive.ObjectID `bson:"_id,omitempty"`
+	User       string             `json:"name" bson:"name"`
+	Query      string             `json:"query" bson:"query"`
+	SearchTime time.Time          `json:"searchTime" bson:"searchTime"`
+	Count      int                `json:"count" bson:"count"`
+}
+
+// PromotionConfig stores company product operator's promotion configurations
+type PromotionConfig struct {
+	ID                primitive.ObjectID `bson:"_id,omitempty"`
+	Status            string             `json:"status" bson:"status"`
+	PromotionKeywords []string           `json:"promotionKeywords" bson:"promotionKeywords"`
+	PromotionItemIDs  []string           `json:"PromotionItemIDs" bson:"PromotionItemIDs"`
+	StartDate         time.Time          `json:"startDate" bson:"startDate"`
+	EndDate           time.Time          `json:"endDate" bson:"endDate"`
 }
 
 // Results are BSON array object, contains search items
@@ -50,6 +75,16 @@ type SearchRsp struct {
 }
 
 func main() {
+	file, err := os.OpenFile("logrus.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		logrus.Fatal("Failed to log to file, using default stderr")
+	}
+	defer file.Close()
+
+	// Set up logrus
+	log = logrus.New()
+	log.Out = file
+
 	// Serve static files from the 'html' directory
 	fs := http.FileServer(http.Dir("./html"))
 	http.Handle("/", fs)
@@ -59,6 +94,7 @@ func main() {
 	http.HandleFunc("/report-click", reportHandler)
 	http.HandleFunc("/search", searchHandler)
 	http.HandleFunc("/search-p", personalizedSearchHandler)
+	http.HandleFunc("/search-m", marketingSearchHandler) // supporting company operator recommending items or keywords
 
 	// Start the server
 	http.ListenAndServe(":8080", nil)
@@ -128,7 +164,7 @@ func getItemList(skip int) Results {
 	if err = cursor.All(context.Background(), &results); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println(results)
+	log.Info(results)
 	return results
 }
 
@@ -172,11 +208,16 @@ func reportHandler(w http.ResponseWriter, r *http.Request) {
 	collection := client.Database(DB).Collection(CUSTOMER_COLLECTION)
 
 	// Print the body to the server's console
-	fmt.Println("Received request with body:", string(body))
-	var click ReportItem
+	log.Info("Received request with body:", string(body))
+	var click ItemReport
 	err = json.Unmarshal(body, &click)
 	if err != nil {
-		log.Fatal("Unmarshal the click report with error input body: %s, err: %v", string(body), err)
+		log.WithFields(
+			logrus.Fields{
+				"body": body,
+				"err":  err,
+			},
+		).Fatal("unmarshal the click report with error input body failed")
 	}
 
 	click.ViewTime = time.Now()
@@ -201,7 +242,84 @@ func reportHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func pipelineC(query string, page int, views []bson.M) []bson.D {
+// pipelineP M means marking promotion
+func pipelineM(query string, page int, config *PromotionConfig) []bson.D {
+	var searchStage bson.D
+	searchStage = bson.D{
+		{"$search", bson.D{
+			{"index", "item_search2"},
+			{"compound", bson.D{
+				{"should", bson.A{
+					bson.D{{"text", bson.D{{"query", query}, {"path", "name2"}, {"score", bson.D{{"boost", bson.D{{"value", 20}}}}}}}},
+					bson.D{{"text", bson.D{{"query", query}, {"path", "name"}, {"score", bson.D{{"boost", bson.D{{"value", 15}}}}}}}},
+				}},
+				{"minimumShouldMatch", 1},
+			}},
+		}},
+	}
+	if config != nil {
+		if len(config.PromotionKeywords) != 0 {
+
+		}
+		query += " OR ("
+		for k, v := range config.PromotionKeywords {
+			if k == len(config.PromotionKeywords)-1 {
+				query += v
+			} else {
+				query += v + " OR "
+			}
+		}
+		query += ")"
+		log.WithFields(
+			logrus.Fields{
+				"formed query": query,
+			},
+		).Info("the enhanced query is")
+		searchStage = bson.D{
+			{"$search", bson.D{
+				{"index", "item_search2"},
+				{"compound", bson.D{
+					{"should", bson.A{
+						bson.D{{"queryString", bson.D{{"query", query}, {"defaultPath", "name2"}, {"score", bson.D{{"boost", bson.D{{"value", 20}}}}}}}},
+						bson.D{{"queryString", bson.D{{"query", query}, {"defaultPath", "name"}, {"score", bson.D{{"boost", bson.D{{"value", 15}}}}}}}},
+					}},
+					{"minimumShouldMatch", 1},
+				}},
+			}},
+		}
+	}
+
+	limitStage := bson.D{{"$limit", 10}}
+	projectStage := bson.D{
+		{
+			Key: "$project", Value: bson.D{
+				{"_id", 0},
+				{"name", 1},
+				{"name2", 1},
+				{"price", 1},
+				{"imageUrl", 1},
+				{"imageUrl2", 1},
+				{"documentId", 1},
+			},
+		},
+	}
+	skipStage := bson.D{{"$skip", (page - 1) * 10}}
+	// Modify according to your needs
+	p := mongo.Pipeline{searchStage, limitStage, projectStage}
+	if page > 1 {
+		p = mongo.Pipeline{searchStage, skipStage, limitStage, projectStage}
+	}
+	log.WithFields(
+		logrus.Fields{
+			"query":   query,
+			"pipline": p,
+		},
+	).Info("generated pipline finished")
+	return p
+}
+
+// pipelineP P means personalized
+func pipelineP(query string, page int, views []bson.M) []bson.D {
 	searchStage := bson.D{
 		{"$search", bson.D{
 			{"index", "item_search2"},
@@ -236,7 +354,12 @@ func pipelineC(query string, page int, views []bson.M) []bson.D {
 	if page > 1 {
 		p = mongo.Pipeline{searchStage, skipStage, limitStage, projectStage}
 	}
-	fmt.Printf("the pipeline is %v\n", p)
+	log.WithFields(
+		logrus.Fields{
+			"query":   query,
+			"pipline": p,
+		},
+	).Info("generated pipline finished")
 	return p
 }
 
@@ -275,6 +398,13 @@ func pipeline(query string, page int) []bson.D {
 	if page > 1 {
 		p = mongo.Pipeline{searchStage, skipStage, limitStage, projectStage}
 	}
+
+	log.WithFields(
+		logrus.Fields{
+			"query":   query,
+			"pipline": p,
+		},
+	).Info("generated pipline finished")
 	return p
 }
 
@@ -284,9 +414,9 @@ func personalizedSearchHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		page = 0
 	}
-	inputQuery := r.URL.Query().Get("query")
+	query := r.URL.Query().Get("query")
 
-	searchItems := personalizedSearch(inputQuery, page)
+	searchItems := personalizedSearch(query, page)
 
 	// Convert the data to JSON
 	jsonData, err := json.Marshal(searchItems)
@@ -294,10 +424,79 @@ func personalizedSearchHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Error converting data", http.StatusInternalServerError)
 		return
 	}
+	go queryReport(query)
 
 	// Set the Content-Type and write the JSON response
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(jsonData)
+}
+
+func marketingSearchHandler(w http.ResponseWriter, r *http.Request) {
+	pageNum := r.URL.Query().Get("page")
+	page, err := strconv.Atoi(pageNum)
+	if err != nil {
+		page = 0
+	}
+	query := r.URL.Query().Get("query")
+
+	searchItems := marktingSearch(query, page)
+
+	// Convert the data to JSON
+	jsonData, err := json.Marshal(searchItems)
+	if err != nil {
+		http.Error(w, "Error converting data", http.StatusInternalServerError)
+		return
+	}
+	go queryReport(query)
+
+	// Set the Content-Type and write the JSON response
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(jsonData)
+}
+
+func queryReport(query string) {
+	client, err := GetMongoClient()
+	if err != nil {
+		log.Fatal(err)
+	}
+	collection := client.Database(DB).Collection(SEARCH_REPORT_COLLECTION)
+
+	var searchReport QueryReport
+	filter := bson.M{"name": "benjamin", "query": query}
+	if err = collection.FindOne(context.TODO(), filter).Decode(&searchReport); err != nil && err != mongo.ErrNoDocuments {
+		log.WithFields(
+			logrus.Fields{
+				"query": query,
+				"err":   err,
+			},
+		).Error("get user search query from mongoDB failed")
+		return
+	}
+
+	log.WithFields(
+		logrus.Fields{
+			"query":  query,
+			"result": searchReport,
+			"err":    err,
+		}).Info("search one query result ")
+	if err == mongo.ErrNoDocuments {
+		searchReport.Count = 1
+		searchReport.Query = query
+		searchReport.SearchTime = time.Now()
+		searchReport.User = "benjamin"
+	} else {
+		searchReport.Count++
+	}
+
+	update := bson.M{
+		"$set": searchReport,
+	}
+	// Set the Upsert option to true
+	opts := options.Update().SetUpsert(true)
+
+	if _, err := collection.UpdateOne(context.TODO(), filter, update, opts); err != nil {
+		log.Error(err)
+	}
 }
 
 // searchHandler accept the search request, search the match items
@@ -309,9 +508,9 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		page = 0
 	}
-	inputQuery := r.URL.Query().Get("query")
+	query := r.URL.Query().Get("query")
 
-	searchItems := search(inputQuery, page)
+	searchItems := search(query, page)
 
 	// Convert the data to JSON
 	jsonData, err := json.Marshal(searchItems)
@@ -320,11 +519,14 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	go queryReport(query)
 	// Set the Content-Type and write the JSON response
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(jsonData)
 }
 
+// personalizedSearch will merge the user-activity-based recommendation with
+// user input keywords search result as response
 func personalizedSearch(query string, page int) SearchRsp {
 	var rsp SearchRsp
 	client, err := GetMongoClient()
@@ -333,16 +535,38 @@ func personalizedSearch(query string, page int) SearchRsp {
 	}
 	collection := client.Database(DB).Collection(COLLECTION)
 	views := getRecentViewItems()
-	p := pipelineC(query, page, views)
+	p := pipelineP(query, page, views)
 
 	cursor, err := collection.Aggregate(context.TODO(), p)
 	if err != nil {
-		fmt.Printf("search aggregate run failed, err %v", err)
 		log.Fatal(err)
 	}
 	var results []bson.M
 	if err = cursor.All(context.Background(), &results); err != nil {
-		fmt.Printf("search cursor run failed, err %v", err)
+		log.Fatal(err)
+	}
+	rsp.SearchResults = results
+	return rsp
+}
+
+// marktingSearch will merge the commany operator configured promotion items with
+// user input keywords search result as response
+func marktingSearch(query string, page int) SearchRsp {
+	var rsp SearchRsp
+	client, err := GetMongoClient()
+	if err != nil {
+		log.Fatal(err)
+	}
+	collection := client.Database(DB).Collection(COLLECTION)
+	config := getMarketingConfig()
+	p := pipelineM(query, page, config)
+
+	cursor, err := collection.Aggregate(context.TODO(), p)
+	if err != nil {
+		log.Fatal(err)
+	}
+	var results []bson.M
+	if err = cursor.All(context.Background(), &results); err != nil {
 		log.Fatal(err)
 	}
 	rsp.SearchResults = results
@@ -360,21 +584,17 @@ func search(query string, page int) SearchRsp {
 	collection := client.Database(DB).Collection(COLLECTION)
 
 	p := pipeline(query, page)
-	fmt.Printf("search pipeline is %v\n", p)
 
 	cursor, err := collection.Aggregate(context.TODO(), p)
 	if err != nil {
-		fmt.Printf("search aggregate run failed, err %v", err)
 		log.Fatal(err)
 	}
 	var results []bson.M
 	if err = cursor.All(context.Background(), &results); err != nil {
-		fmt.Printf("search cursor run failed, err %v", err)
 		log.Fatal(err)
 	}
 	rsp.SearchResults = results
 	rsp.MoreLikeThisResults = moreLikeThis()
-	fmt.Printf("rsp is %v\n", rsp)
 	return rsp
 }
 
@@ -441,15 +661,47 @@ func getRecentViewItems() []bson.M {
 	cursor, err := icollection.Find(context.TODO(), bson.M{"documentId": bson.M{"$in": IDs}}, findOptions)
 
 	if err != nil {
-		fmt.Printf("get recent view item failed, err %v", err)
 		log.Fatal(err)
 	}
 	var results []bson.M
 	if err = cursor.All(context.Background(), &results); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("the recent view items are %v\n", results)
 	return results
+}
+
+// getMarketingConfig gets the active promotion configuration from DB
+func getMarketingConfig() *PromotionConfig {
+	client, err := GetMongoClient()
+	if err != nil {
+		log.Fatal(err)
+	}
+	collection := client.Database(DB).Collection(MARKETING_CONFIG_COLLECTION)
+	filter := bson.M{
+		"status": "active",
+		"startDate": bson.M{
+			"$lte": time.Now(),
+		},
+		"endDate": bson.M{
+			"$gte": time.Now(),
+		},
+	}
+
+	// Fetch the document
+	var p PromotionConfig
+	err = collection.FindOne(context.TODO(), filter).Decode(&p)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			log.WithFields(
+				logrus.Fields{
+					"filter": filter,
+				}).Info("No active promotion found")
+			return nil
+		} else {
+			log.Fatal(err)
+		}
+	}
+	return &p
 }
 
 func getRecentViewItem() bson.M {
@@ -465,12 +717,14 @@ func getRecentViewItem() bson.M {
 	}
 	views := doc["viewHistory"].(bson.A)
 	v := views[len(views)-1].(bson.M)
-	fmt.Printf("recently view itemid is %v", v)
+	log.WithFields(
+		logrus.Fields{
+			"recentViewItems": v,
+		}).Info("get user recent view history")
 
 	icollection := client.Database(DB).Collection(COLLECTION)
 	var like bson.M
 	if err := icollection.FindOne(context.TODO(), bson.M{"documentId": v["documentId"]}).Decode(&like); err != nil {
-		fmt.Printf("get recent view item failed, err %v", err)
 		log.Fatal(err)
 	}
 	return like
@@ -485,7 +739,6 @@ func moreLikeThis() Results {
 	collection := client.Database(DB).Collection(COLLECTION)
 	like := getRecentViewItem()
 	p := moreLikePipe(like)
-	//fmt.Printf("more like this pipeline %v", p)
 
 	cursor, err := collection.Aggregate(context.TODO(), p)
 	if err != nil {
@@ -495,6 +748,5 @@ func moreLikeThis() Results {
 	if err = cursor.All(context.Background(), &results); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("moreLieThis rsp is %v\n", results)
 	return results
 }
